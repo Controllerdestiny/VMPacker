@@ -1,16 +1,18 @@
 # ============================================================================
-# VMPacker CI build — 单作业原子构建 + 冒烟测试
+# VMPacker CI build — CLI + Wails GUI
 #
-# 修复了原 build.yml 的问题：
-#   * go:embed vm_interp.bin 的路径在跨作业 artifact 传递时错位（v4 保留 build/ 前缀）
-#     → 改为同一作业内直接生成到 cmd/vmpacker/vm_interp.bin，不再跨作业传 blob
-#   * 无验证 → 增加冒烟测试：交叉编译 demo_license 并用 vmpacker 实际打包校验
-#   * Wails GUI 作业易碎且非必要，已移除（需要时再单独加）
+# jobs:
+#   * build-cli   — 编译 VM 解释器 stub → 生成 vm_interp.bin → 构建 Windows/Linux
+#                   CLI → 冒烟测试（demo_license）→ 上传 vmpacker.exe / vmpacker /
+#                   vm-interp-blob（GUI job 复用）
+#   * build-gui   — Wails v2 GUI（Windows）：复用 vm-interp-blob 放到
+#                   vmp-gui/backend/api/vm_interp.bin（engine.go go:embed）→
+#                   前端 npm build → MSYS2 gcc（wails CGO 需要）→ wails build
+#                   → 上传 vmp-gui.exe
 #
-# 触发：手动 workflow_dispatch，或 push 到 main/master 且改动 vmpacker 源码
-# 产物：vmpacker.exe（Windows，你要的）+ vmpacker（Linux）+ vm_interp.bin
+# 触发：手动 workflow_dispatch，或 push 到 main/master 且改动相关源码
 # ============================================================================
-name: Build vmpacker CLI
+name: Build vmpacker CLI + GUI
 
 on:
   workflow_dispatch:
@@ -20,11 +22,15 @@ on:
       - 'cmd/**'
       - 'pkg/**'
       - 'stub/**'
+      - 'vmp-gui/**'
       - 'Makefile'
       - 'go.mod'
       - '.github/workflows/build.yml'
 
 jobs:
+  # ==========================================================================
+  # 1) CLI（原作业，保持不动）
+  # ==========================================================================
   build-cli:
     name: Build stub + CLI + smoke test
     runs-on: ubuntu-latest
@@ -130,4 +136,69 @@ jobs:
         with:
           name: vm-interp-blob
           path: cmd/vmpacker/vm_interp.bin
+          if-no-files-found: error
+
+  # ==========================================================================
+  # 2) GUI（Wails v2，Windows）——依赖 build-cli 的 vm_interp.bin
+  # ==========================================================================
+  build-gui:
+    name: Build Wails GUI (vmp-gui.exe)
+    needs: build-cli
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---------- 复用 CLI job 生成的解释器 blob ----------
+      - name: Download vm_interp.bin (from build-cli)
+        uses: actions/download-artifact@v4
+        with:
+          name: vm-interp-blob
+          path: blob
+
+      - name: Place blob where the GUI backend embeds it
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force vmp-gui/backend/api | Out-Null
+          Copy-Item blob/vm_interp.bin vmp-gui/backend/api/vm_interp.bin -Force
+          Get-Item vmp-gui/backend/api/vm_interp.bin | Select-Object Name, Length
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: vmp-gui/go.mod
+          cache: true
+
+      # ---------- Wails 在 Windows 编译需要 gcc（CGO） ----------
+      - name: Setup MSYS2 toolchain (mingw gcc for wails)
+        uses: msys2/setup-msys2@v2
+        with:
+          update: true
+          install: mingw-w64-x86_64-gcc
+
+      # ---------- 前端（Vite + Vue，wails 内嵌 frontend/dist） ----------
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+          cache-dependency-path: vmp-gui/frontend/package-lock.json
+
+      - name: Build frontend
+        working-directory: vmp-gui/frontend
+        shell: bash
+        run: |
+          npm install
+          npm run build
+          ls -la dist/
+
+      # ---------- wails build（msys2 shell 里跑，保证 gcc 在 PATH） ----------
+      - name: Build vmp-gui.exe (wails)
+        shell: msys2 {0}
+        working-directory: vmp-gui
+        run: |
+          go run github.com/wailsapp/wails/v2/cmd/wails@v2.11.0 build -trimpath
+
+      - name: Upload vmp-gui.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: vmp-gui-windows
+          path: vmp-gui/build/bin/vmp-gui.exe
           if-no-files-found: error
