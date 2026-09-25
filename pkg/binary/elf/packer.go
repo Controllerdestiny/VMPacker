@@ -706,7 +706,7 @@ func (p *Packer) injectVMPBatch(funcs []FuncBytecode) error {
 	// 2. 追加到文件末尾 (页对齐，兼容 QEMU 用户态)
 	// 先将文件填充到页边界
 	appendOff := uint64(len(p.data))
-	padLen := (0x1000 - (appendOff % 0x1000)) % 0x1000
+	padLen := (0x10000 - (appendOff % 0x10000)) % 0x10000
 	for i := uint64(0); i < padLen; i++ {
 		p.data = append(p.data, 0x00)
 	}
@@ -763,7 +763,7 @@ func (p *Packer) injectVMPBatch(funcs []FuncBytecode) error {
 		Paddr:  payloadVA,
 		Filesz: uint64(len(payload)),
 		Memsz:  uint64(len(payload)),
-		Align:  0x1000,
+		Align:  0x10000,
 	}
 	writePhdr64(p.data, notePhdrOff, newPhdr)
 
